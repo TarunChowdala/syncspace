@@ -13,10 +13,9 @@ import {
   InputGroup,
   InputLeftElement,
   FormControl,
-  FormLabel,
   useToast,
 } from '@chakra-ui/react';
-import { Video, Keyboard, User, Hash } from 'lucide-react';
+import { Video, User, Hash } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { useState } from 'react';
 import { nanoid } from 'nanoid';
