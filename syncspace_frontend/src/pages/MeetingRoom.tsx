@@ -3,7 +3,7 @@ import { Mic, MicOff, Video, VideoOff, PhoneOff, Users, MessageSquare, MonitorUp
 import { useStore } from '../store/useStore';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useEffect, useState, useRef } from 'react';
-import { joinRoom, leaveRoom } from '../services/socket';
+import { getSocket, joinRoom, leaveRoom } from '../services/socket';
 
 export default function MeetingRoom() {
   const { isMicOn, isCameraOn, toggleMic, toggleCamera, user } = useStore();
@@ -14,6 +14,15 @@ export default function MeetingRoom() {
   const localStreamRef = useRef<MediaStream | null>(null);
   const peersRef = useRef<Map<string, RTCPeerConnection>>(new Map());
   const remoteVideoRefs = useRef<Record<string, HTMLVideoElement | null>>({});
+
+  const dedupeParticipants = (participants: any[]) => {
+    return participants.reduce((acc: any[], participant) => {
+      if (!acc.some((p) => p.socketId === participant.socketId)) {
+        acc.push(participant);
+      }
+      return acc;
+    }, []);
+  };
 
   useEffect(() => {
     if (!id) return;
@@ -28,7 +37,9 @@ export default function MeetingRoom() {
     socket.on('existing-participants', (data: any) => {
       console.log('All users in room', data);
       // Filter out ourselves (server includes the joining user in the list)
-      const filtered = data.filter((p: any) => p.socketId !== socket.id);
+      const filtered = dedupeParticipants(
+        data.filter((p: any) => p.socketId !== socket.id)
+      );
       setParticipants(filtered);
 
       // Create peer connections to existing participants (we initiate)
@@ -43,7 +54,10 @@ export default function MeetingRoom() {
     socket.on('user-joined', (data: any) => {
       console.log(data, 'user joined');
       if (data.socketId === socket.id) return;
-      setParticipants((prev) => [...prev, data]);
+      setParticipants((prev) => {
+        const next = dedupeParticipants([...prev, data]);
+        return next;
+      });
       // New user joined -> initiate a peer connection
       if (!peersRef.current.has(data.socketId)) {
         createPeer(data.socketId, true, socket);
@@ -82,8 +96,7 @@ export default function MeetingRoom() {
   // Socket signaling handlers (handle incoming offers/answers/candidates)
   useEffect(() => {
     if (!id) return;
-    const userName = user?.name || localStorage.getItem('userName') || 'Guest';
-    const socket = joinRoom(id, userName);
+    const socket = getSocket();
 
     const onOffer = async ({ from, offer }: any) => {
       let peer = peersRef.current.get(from);

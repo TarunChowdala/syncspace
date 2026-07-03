@@ -5,6 +5,9 @@ export const addUserToRoom = (roomId, user) => {
     rooms[roomId] = [];
   }
 
+  rooms[roomId] = rooms[roomId].filter(
+    (existing) => existing.socketId !== user.socketId
+  );
   rooms[roomId].push(user);
 };
 
