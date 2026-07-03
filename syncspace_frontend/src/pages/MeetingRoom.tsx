@@ -129,9 +129,13 @@ export default function MeetingRoom() {
         return;
       }
       await peer.setRemoteDescription(new RTCSessionDescription(offer));
+      console.log('Remote SDP (offer) set for', from, '\n', peer.remoteDescription?.sdp?.split('\n').slice(0,10).join('\n'));
+      console.log('Receivers after setting remote offer:', peer.getReceivers().map(r=>({id:r.track?.id, kind: r.track?.kind})));
+      console.log('Transceivers after setting remote offer:', peer.getTransceivers().map(t=>({mid:t.mid,direction:t.direction})));
       await drainIceCandidates(from, peer);
       const answer = await peer.createAnswer();
       await peer.setLocalDescription(answer);
+      console.log('Local SDP (answer) for', from, '\n', peer.localDescription?.sdp?.split('\n').slice(0,10).join('\n'));
       console.log('Sending answer to', from);
       socket.emit('answer', { to: from, answer });
     };
@@ -146,6 +150,9 @@ export default function MeetingRoom() {
         return;
       }
       await peer.setRemoteDescription(new RTCSessionDescription(answer));
+      console.log('Remote SDP (answer) set for', from, '\n', peer.remoteDescription?.sdp?.split('\n').slice(0,10).join('\n'));
+      console.log('Receivers after setting remote answer:', peer.getReceivers().map(r=>({id:r.track?.id, kind: r.track?.kind})));
+      console.log('Transceivers after setting remote answer:', peer.getTransceivers().map(t=>({mid:t.mid,direction:t.direction})));
       await drainIceCandidates(from, peer);
     };
 
@@ -309,6 +316,7 @@ export default function MeetingRoom() {
       try {
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
+        console.log('Local SDP (offer) for', peerId, '\n', pc.localDescription?.sdp?.split('\n').slice(0,10).join('\n'));
         socket.emit('offer', { to: peerId, offer });
       } catch (err) {
         console.error('Offer error', err);
