@@ -16,6 +16,7 @@ export default function MeetingRoom() {
   const remoteVideoRefs = useRef<Record<string, HTMLVideoElement | null>>({});
   const iceCandidateQueueRef = useRef<Record<string, RTCIceCandidateInit[]>>({});
   const remoteStreamsRef = useRef<Record<string, MediaStream | null>>({});
+  const pendingInitiatorQueueRef = useRef<string[]>([]);
 
   const dedupeParticipants = (participants: any[]) => {
     return participants.reduce((acc: any[], participant) => {
@@ -50,10 +51,15 @@ export default function MeetingRoom() {
       setParticipants(filtered);
 
       // Create peer connections to existing participants (we initiate)
+      // If local media isn't ready yet, queue initiator creation and drain later.
       filtered.forEach((p: any) => {
         if (p.socketId === socket.id) return;
-        if (!peersRef.current.has(p.socketId)) {
+        if (peersRef.current.has(p.socketId)) return;
+        if (localStreamRef.current) {
           createPeer(p.socketId, true, socket);
+        } else {
+          pendingInitiatorQueueRef.current.push(p.socketId);
+          console.log('Queued initiator peer for', p.socketId);
         }
       });
     });
@@ -214,6 +220,18 @@ export default function MeetingRoom() {
         if (localVideoRef.current) {
           localVideoRef.current.srcObject = stream;
           await localVideoRef.current.play().catch(() => {});
+          // If we queued initiator peers while waiting for media, create them now
+          const queued = pendingInitiatorQueueRef.current.splice(0);
+          if (queued.length) {
+            const socket = getSocket();
+            console.log('Draining', queued.length, 'queued initiator peers after media ready', queued);
+            queued.forEach((peerId) => {
+              if (!peersRef.current.has(peerId)) {
+                createPeer(peerId, true, socket);
+                console.log('Draining queued initiator peer', peerId);
+              }
+            });
+          }
         }
       } catch (error) {
         console.error('Media error:', error);
