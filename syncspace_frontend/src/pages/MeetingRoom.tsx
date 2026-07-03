@@ -65,10 +65,8 @@ export default function MeetingRoom() {
         console.log('Participants after join:', next.map((p: any) => p.socketId));
         return next;
       });
-      // New user joined -> initiate a peer connection
-      if (!peersRef.current.has(data.socketId)) {
-        createPeer(data.socketId, true, socket);
-      }
+      // Existing participants should not initiate offers for the new user.
+      // The newly joined participant will create offers to existing users.
     });
 
     socket.on('user-left', (data: any) => {
