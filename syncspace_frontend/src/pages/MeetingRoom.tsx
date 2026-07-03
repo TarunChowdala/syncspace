@@ -29,18 +29,23 @@ export default function MeetingRoom() {
     if (!id) return;
 
     const userName = user?.name || localStorage.getItem('userName') || 'Guest';
+    console.log('Joining room', id, 'as', userName);
     const socket = joinRoom(id, userName);
 
     socket.on('connect', () => {
       console.log('Connected to server', socket.id);
     });
+    socket.on('connect_error', (err: any) => {
+      console.error('Socket connect_error', err);
+    });
 
     socket.on('existing-participants', (data: any) => {
-      console.log('All users in room', data);
+      console.log('All users in room', id, 'count=', data?.length, data);
       // Filter out ourselves (server includes the joining user in the list)
       const filtered = dedupeParticipants(
         data.filter((p: any) => p.socketId !== socket.id)
       );
+      console.log('Filtered participants (without self):', filtered.map((p: any) => p.socketId));
       setParticipants(filtered);
 
       // Create peer connections to existing participants (we initiate)
@@ -53,10 +58,11 @@ export default function MeetingRoom() {
     });
 
     socket.on('user-joined', (data: any) => {
-      console.log(data, 'user joined');
+      console.log('user-joined event', data);
       if (data.socketId === socket.id) return;
       setParticipants((prev) => {
         const next = dedupeParticipants([...prev, data]);
+        console.log('Participants after join:', next.map((p: any) => p.socketId));
         return next;
       });
       // New user joined -> initiate a peer connection
@@ -66,8 +72,9 @@ export default function MeetingRoom() {
     });
 
     socket.on('user-left', (data: any) => {
-      console.log(data, 'user left');
+      console.log('user-left event', data);
       setParticipants((prev) => prev.filter((p) => p.socketId !== data.socketId));
+      console.log('Participants after leave:', participants.map((p: any) => p.socketId));
       // cleanup peer and refs
       const pc = peersRef.current.get(data.socketId);
       if (pc) {
@@ -103,17 +110,19 @@ export default function MeetingRoom() {
       const queued = iceCandidateQueueRef.current[peerId] || [];
       if (!queued.length) return;
 
+      console.log('Draining', queued.length, 'queued ICE candidates for', peerId);
       for (const candidate of queued) {
         try {
           await pc.addIceCandidate(new RTCIceCandidate(candidate));
         } catch (err) {
-          console.warn('Failed to add queued ICE candidate', err);
+          console.warn('Failed to add queued ICE candidate', err, candidate);
         }
       }
       iceCandidateQueueRef.current[peerId] = [];
     };
 
     const onOffer = async ({ from, offer }: any) => {
+      console.log('Received offer from', from);
       let peer = peersRef.current.get(from);
       if (!peer) peer = await createPeer(from, false, socket);
       if (peer.signalingState !== 'stable') {
@@ -124,12 +133,15 @@ export default function MeetingRoom() {
       await drainIceCandidates(from, peer);
       const answer = await peer.createAnswer();
       await peer.setLocalDescription(answer);
+      console.log('Sending answer to', from);
       socket.emit('answer', { to: from, answer });
     };
 
     const onAnswer = async ({ from, answer }: any) => {
+      console.log('Received answer from', from);
       const peer = peersRef.current.get(from);
       if (!peer) return;
+      console.log('Peer signaling state before answer:', peer.signalingState);
       if (peer.signalingState !== 'have-local-offer' && peer.signalingState !== 'have-remote-pranswer') {
         console.warn('Ignoring answer because peer is in wrong state:', peer.signalingState);
         return;
@@ -139,16 +151,19 @@ export default function MeetingRoom() {
     };
 
     const onIce = async ({ from, candidate }: any) => {
+      console.log('Received ICE candidate from', from);
       const peer = peersRef.current.get(from);
       if (!peer || !candidate) return;
       const candidateObj = new RTCIceCandidate(candidate);
       if (peer.remoteDescription && peer.remoteDescription.type) {
         try {
           await peer.addIceCandidate(candidateObj);
+          console.log('Added ICE candidate to peer', from);
         } catch (err) {
-          console.warn('Failed to add ICE candidate directly', err);
+          console.warn('Failed to add ICE candidate directly', err, candidate);
         }
       } else {
+        console.log('Queueing ICE candidate for', from);
         iceCandidateQueueRef.current[from] = iceCandidateQueueRef.current[from] || [];
         iceCandidateQueueRef.current[from].push(candidate);
       }
@@ -184,9 +199,11 @@ export default function MeetingRoom() {
           audio: isMicOn,
         };
 
+        console.log('Requesting media with constraints', constraints);
         const stream = await navigator.mediaDevices.getUserMedia(constraints);
         localStreamRef.current?.getTracks().forEach((track) => track.stop());
         localStreamRef.current = stream;
+        console.log('Obtained local stream tracks:', stream.getTracks().map(t => t.kind));
 
         if (localVideoRef.current) {
           localVideoRef.current.srcObject = stream;
@@ -239,10 +256,12 @@ export default function MeetingRoom() {
     // Add local tracks
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach((track) => pc.addTrack(track, localStreamRef.current as MediaStream));
+      console.log('createPeer:', peerId, 'added local tracks:', localStreamRef.current.getTracks().map(t => t.kind));
     }
 
     pc.onicecandidate = (event) => {
       if (event.candidate) {
+        console.log('pc.onicecandidate -> sending candidate for', peerId, event.candidate && event.candidate.candidate?.substring(0,80));
         socket.emit('ice-candidate', { to: peerId, candidate: event.candidate });
       }
     };
@@ -250,20 +269,35 @@ export default function MeetingRoom() {
     pc.ontrack = (event) => {
       const stream = event.streams?.[0];
       if (!stream) return;
+      const kinds = stream.getTracks().map(t => t.kind);
+      const id = stream.id;
       const videoEl = remoteVideoRefs.current[peerId];
+      console.log('pc.ontrack from', peerId, 'streamId=', id, 'tracks=', kinds, 'videoElPresent=', !!videoEl);
       if (videoEl) {
-        videoEl.srcObject = stream;
-        videoEl.play().catch(() => {});
+        try {
+          videoEl.srcObject = stream;
+          videoEl.play().then(() => {
+            console.log('video.play() succeeded for', peerId, 'streamId=', id);
+          }).catch((err) => {
+            console.warn('video.play() failed for', peerId, err);
+          });
+        } catch (e) {
+          console.warn('Error attaching stream to video element for', peerId, e);
+        }
       }
       // Trigger re-render to show video element if needed
       setParticipants((prev) => [...prev]);
     };
 
     pc.onconnectionstatechange = () => {
+      console.log('pc.onconnectionstatechange', peerId, pc.connectionState, 'ice=', pc.iceConnectionState);
       if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
-        pc.close();
+        try { pc.close(); } catch (e) {}
         peersRef.current.delete(peerId);
       }
+    };
+    pc.oniceconnectionstatechange = () => {
+      console.log('pc.oniceconnectionstatechange', peerId, pc.iceConnectionState);
     };
 
     if (isInitiator) {
