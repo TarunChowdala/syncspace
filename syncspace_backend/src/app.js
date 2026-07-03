@@ -3,7 +3,12 @@ import cors from 'cors';
 
 const app = express();
 
-app.use(cors({ origin: process.env.CLIENT_URL || 'http://localhost:5173' }));
+const corsOptions = {
+  origin: true,
+  credentials: true,
+};
+
+app.use(cors(corsOptions));
 app.use(express.json());
 
 app.get('/health', (req, res) => {

@@ -9,6 +9,7 @@ export function getSocket() {
   if (!socket) {
     socket = io(BACKEND_URL, {
       withCredentials: true,
+      transports: ['websocket'],
     });
   }
   return socket;
