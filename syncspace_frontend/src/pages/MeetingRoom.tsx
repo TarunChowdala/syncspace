@@ -14,6 +14,7 @@ export default function MeetingRoom() {
   const localStreamRef = useRef<MediaStream | null>(null);
   const peersRef = useRef<Map<string, RTCPeerConnection>>(new Map());
   const remoteVideoRefs = useRef<Record<string, HTMLVideoElement | null>>({});
+  const iceCandidateQueueRef = useRef<Record<string, RTCIceCandidateInit[]>>({});
 
   const dedupeParticipants = (participants: any[]) => {
     return participants.reduce((acc: any[], participant) => {
@@ -98,10 +99,29 @@ export default function MeetingRoom() {
     if (!id) return;
     const socket = getSocket();
 
+    const drainIceCandidates = async (peerId: string, pc: RTCPeerConnection) => {
+      const queued = iceCandidateQueueRef.current[peerId] || [];
+      if (!queued.length) return;
+
+      for (const candidate of queued) {
+        try {
+          await pc.addIceCandidate(new RTCIceCandidate(candidate));
+        } catch (err) {
+          console.warn('Failed to add queued ICE candidate', err);
+        }
+      }
+      iceCandidateQueueRef.current[peerId] = [];
+    };
+
     const onOffer = async ({ from, offer }: any) => {
       let peer = peersRef.current.get(from);
       if (!peer) peer = await createPeer(from, false, socket);
+      if (peer.signalingState !== 'stable') {
+        console.warn('Ignoring offer because peer is not stable:', peer.signalingState);
+        return;
+      }
       await peer.setRemoteDescription(new RTCSessionDescription(offer));
+      await drainIceCandidates(from, peer);
       const answer = await peer.createAnswer();
       await peer.setLocalDescription(answer);
       socket.emit('answer', { to: from, answer });
@@ -109,19 +129,28 @@ export default function MeetingRoom() {
 
     const onAnswer = async ({ from, answer }: any) => {
       const peer = peersRef.current.get(from);
-      if (peer) {
-        await peer.setRemoteDescription(new RTCSessionDescription(answer));
+      if (!peer) return;
+      if (peer.signalingState !== 'have-local-offer' && peer.signalingState !== 'have-remote-pranswer') {
+        console.warn('Ignoring answer because peer is in wrong state:', peer.signalingState);
+        return;
       }
+      await peer.setRemoteDescription(new RTCSessionDescription(answer));
+      await drainIceCandidates(from, peer);
     };
 
     const onIce = async ({ from, candidate }: any) => {
       const peer = peersRef.current.get(from);
-      if (peer && candidate) {
+      if (!peer || !candidate) return;
+      const candidateObj = new RTCIceCandidate(candidate);
+      if (peer.remoteDescription && peer.remoteDescription.type) {
         try {
-          await peer.addIceCandidate(new RTCIceCandidate(candidate));
+          await peer.addIceCandidate(candidateObj);
         } catch (err) {
-          console.warn('Failed to add ICE candidate', err);
+          console.warn('Failed to add ICE candidate directly', err);
         }
+      } else {
+        iceCandidateQueueRef.current[from] = iceCandidateQueueRef.current[from] || [];
+        iceCandidateQueueRef.current[from].push(candidate);
       }
     };
 
