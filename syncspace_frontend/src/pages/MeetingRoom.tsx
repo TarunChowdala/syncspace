@@ -15,6 +15,7 @@ export default function MeetingRoom() {
   const peersRef = useRef<Map<string, RTCPeerConnection>>(new Map());
   const remoteVideoRefs = useRef<Record<string, HTMLVideoElement | null>>({});
   const iceCandidateQueueRef = useRef<Record<string, RTCIceCandidateInit[]>>({});
+  const remoteStreamsRef = useRef<Record<string, MediaStream | null>>({});
 
   const dedupeParticipants = (participants: any[]) => {
     return participants.reduce((acc: any[], participant) => {
@@ -255,6 +256,8 @@ export default function MeetingRoom() {
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach((track) => pc.addTrack(track, localStreamRef.current as MediaStream));
       console.log('createPeer:', peerId, 'added local tracks:', localStreamRef.current.getTracks().map(t => t.kind));
+      console.log('createPeer:', peerId, 'senders after addTrack:', pc.getSenders().map(s => ({id: s.track?.id, kind: s.track?.kind})));
+      console.log('createPeer:', peerId, 'transceivers:', pc.getTransceivers().map(t => ({mid: t.mid, direction: t.direction, receiver: !!t.receiver})));
     }
 
     pc.onicecandidate = (event) => {
@@ -269,8 +272,10 @@ export default function MeetingRoom() {
       if (!stream) return;
       const kinds = stream.getTracks().map(t => t.kind);
       const id = stream.id;
+      console.log('pc.ontrack from', peerId, 'streamId=', id, 'tracks=', kinds);
+      // store stream so we can attach when element mounts
+      remoteStreamsRef.current[peerId] = stream;
       const videoEl = remoteVideoRefs.current[peerId];
-      console.log('pc.ontrack from', peerId, 'streamId=', id, 'tracks=', kinds, 'videoElPresent=', !!videoEl);
       if (videoEl) {
         try {
           videoEl.srcObject = stream;
@@ -282,6 +287,8 @@ export default function MeetingRoom() {
         } catch (e) {
           console.warn('Error attaching stream to video element for', peerId, e);
         }
+      } else {
+        console.log('video element not mounted yet for', peerId, 'stream stored');
       }
       // Trigger re-render to show video element if needed
       setParticipants((prev) => [...prev]);
@@ -333,10 +340,24 @@ export default function MeetingRoom() {
             return (
               <GridItem key={p.socketId} bg="gray.800" borderRadius="xl" position="relative" display="flex" alignItems="center" justifyContent="center" overflow="hidden">
                 <video
-                  ref={(el) => { remoteVideoRefs.current[p.socketId] = el; }}
+                  ref={(el) => {
+                    remoteVideoRefs.current[p.socketId] = el;
+                    if (el) {
+                      const s = remoteStreamsRef.current[p.socketId];
+                      if (s) {
+                        try {
+                          el.srcObject = s;
+                          el.play().then(() => console.log('Attached and started video element for', p.socketId)).catch((e) => console.warn('Auto-play failed on attach for', p.socketId, e));
+                        } catch (e) {
+                          console.warn('Failed to attach stored stream to video element for', p.socketId, e);
+                        }
+                      }
+                    }
+                  }}
                   style={{ width: '100%', height: '100%', objectFit: 'cover' }}
                   playsInline
                   autoPlay
+                  muted
                 />
                 {!hasStream && <Avatar size="2xl" name={p.userName} />}
                 <Box position="absolute" bottom={4} left={4} bg="blackAlpha.600" px={3} py={1} borderRadius="md">
