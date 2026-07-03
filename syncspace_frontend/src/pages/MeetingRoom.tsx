@@ -314,6 +314,18 @@ export default function MeetingRoom() {
 
     if (isInitiator) {
       try {
+        // Ensure the offer contains a video m-line even if local media isn't ready.
+        const hasVideoSender = pc.getSenders().some(s => s.track && s.track.kind === 'video');
+        if (!hasVideoSender) {
+          if (localStreamRef.current) {
+            localStreamRef.current.getTracks().forEach((track) => pc.addTrack(track, localStreamRef.current as MediaStream));
+            console.log('createPeer (initiator): added local tracks before offer for', peerId);
+          } else {
+            // create a transceiver so SDP will include m=video
+            pc.addTransceiver('video', { direction: 'sendrecv' });
+            console.log('createPeer (initiator): added transceiver for', peerId);
+          }
+        }
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
         console.log('Local SDP (offer) for', peerId, '\n', pc.localDescription?.sdp?.split('\n').slice(0,10).join('\n'));
