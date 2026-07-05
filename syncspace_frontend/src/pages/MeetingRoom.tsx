@@ -11,6 +11,7 @@ export default function MeetingRoom() {
   const { id } = useParams();
   const [participants, setParticipants] = useState<any[]>([]);
   const [remoteVideoStates, setRemoteVideoStates] = useState<Record<string, boolean>>({});
+  const [isSpeaking, setIsSpeaking] = useState(false);
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const peersRef = useRef<Map<string, RTCPeerConnection>>(new Map());
@@ -18,6 +19,9 @@ export default function MeetingRoom() {
   const iceCandidateQueueRef = useRef<Record<string, RTCIceCandidateInit[]>>({});
   const remoteStreamsRef = useRef<Record<string, MediaStream | null>>({});
   const pendingInitiatorQueueRef = useRef<string[]>([]);
+  const audioContextRef = useRef<AnalyserNode | null>(null);
+  const animationFrameRef = useRef<number | null>(null);
+  const remoteVideoElementsAttachedRef = useRef<Set<string>>(new Set());
 
   const dedupeParticipants = (participants: any[]) => {
     return participants.reduce((acc: any[], participant) => {
@@ -138,6 +142,7 @@ export default function MeetingRoom() {
         try { remoteVideoRefs.current[data.socketId]!.srcObject = null; } catch (e) {}
         delete remoteVideoRefs.current[data.socketId];
       }
+      remoteVideoElementsAttachedRef.current.delete(data.socketId);
     });
 
     socket.on('disconnect', () => {
@@ -292,6 +297,41 @@ export default function MeetingRoom() {
     };
   }, [isCameraOn, isMicOn]);
 
+  // Audio visualization effect
+  useEffect(() => {
+    if (!isMicOn || !localStreamRef.current) {
+      setIsSpeaking(false);
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current);
+      }
+      return;
+    }
+
+    const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+    const analyser = audioContext.createAnalyser();
+    const source = audioContext.createMediaStreamSource(localStreamRef.current);
+    source.connect(analyser);
+    analyser.fftSize = 256;
+    audioContextRef.current = analyser;
+
+    const dataArray = new Uint8Array(analyser.frequencyBinCount);
+    const checkAudio = () => {
+      analyser.getByteFrequencyData(dataArray);
+      const average = dataArray.reduce((a, b) => a + b) / dataArray.length;
+      setIsSpeaking(average > 30);
+      animationFrameRef.current = requestAnimationFrame(checkAudio);
+    };
+    checkAudio();
+
+    return () => {
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current);
+      }
+      try { source.disconnect(); } catch (e) {}
+      try { audioContext.close(); } catch (e) {}
+    };
+  }, [isMicOn]);
+
   // When local stream changes, update tracks on existing peer connections
   useEffect(() => {
     console.log('Track management effect triggered - isMicOn:', isMicOn, 'isCameraOn:', isCameraOn);
@@ -300,44 +340,24 @@ export default function MeetingRoom() {
       try {
         const senders = peer.getSenders();
         
-        // Handle video track
+        // Handle video track - use enabled flag instead of replacing
         const videoSender = senders.find((s) => {
           try { return s.track?.kind === 'video'; } catch { return false; }
         });
-        const newVideoTrack = isCameraOn 
-          ? localStreamRef.current?.getTracks().find((t) => t.kind === 'video') || null 
-          : null;
         
-        if (videoSender) {
-          videoSender.replaceTrack(newVideoTrack).then(() => {
-            console.log('Video track replaced for peer', peerId, '- new track:', newVideoTrack ? 'present' : 'null');
-          }).catch((err) => {
-            console.warn('Failed to replace video track:', err);
-          });
-        } else if (newVideoTrack && localStreamRef.current) {
-          // Add video track if it doesn't exist as a sender
-          peer.addTrack(newVideoTrack, localStreamRef.current);
-          console.log('Video track added for peer', peerId);
+        if (videoSender && videoSender.track) {
+          videoSender.track.enabled = isCameraOn;
+          console.log('Video track enabled set to', isCameraOn, 'for peer', peerId);
         }
         
-        // Handle audio track
+        // Handle audio track - use enabled flag instead of replacing
         const audioSender = senders.find((s) => {
           try { return s.track?.kind === 'audio'; } catch { return false; }
         });
-        const newAudioTrack = isMicOn 
-          ? localStreamRef.current?.getTracks().find((t) => t.kind === 'audio') || null 
-          : null;
         
-        if (audioSender) {
-          audioSender.replaceTrack(newAudioTrack).then(() => {
-            console.log('Audio track replaced for peer', peerId, '- new track:', newAudioTrack ? 'present' : 'null');
-          }).catch((err) => {
-            console.warn('Failed to replace audio track:', err);
-          });
-        } else if (newAudioTrack && localStreamRef.current) {
-          // Add audio track if it doesn't exist as a sender
-          peer.addTrack(newAudioTrack, localStreamRef.current);
-          console.log('Audio track added for peer', peerId);
+        if (audioSender && audioSender.track) {
+          audioSender.track.enabled = isMicOn;
+          console.log('Audio track enabled set to', isMicOn, 'for peer', peerId);
         }
       } catch (err) {
         console.error('Error updating tracks for peer', peerId, ':', err);
@@ -403,20 +423,24 @@ export default function MeetingRoom() {
       
       // store stream so we can attach when element mounts
       remoteStreamsRef.current[peerId] = stream;
-      const videoEl = remoteVideoRefs.current[peerId];
-      if (videoEl) {
-        try {
-          videoEl.srcObject = stream;
-          videoEl.play().then(() => {
-            console.log('video.play() succeeded for', peerId);
-          }).catch((err) => {
-            console.warn('video.play() failed for', peerId, err);
-          });
-        } catch (e) {
-          console.warn('Error attaching stream to video element for', peerId, e);
+      
+      // Only attach stream once to prevent race conditions
+      if (!remoteVideoElementsAttachedRef.current.has(peerId)) {
+        const videoEl = remoteVideoRefs.current[peerId];
+        if (videoEl) {
+          try {
+            videoEl.srcObject = stream;
+            videoEl.play().catch((err) => {
+              console.warn('video.play() failed for', peerId, err);
+            });
+            remoteVideoElementsAttachedRef.current.add(peerId);
+            console.log('video element attached for', peerId);
+          } catch (e) {
+            console.warn('Error attaching stream to video element for', peerId, e);
+          }
+        } else {
+          console.log('video element not mounted yet for', peerId);
         }
-      } else {
-        console.log('video element not mounted yet for', peerId);
       }
       // Trigger re-render to show video element if needed
       setParticipants((prev) => [...prev]);
@@ -481,17 +505,7 @@ export default function MeetingRoom() {
                 <video
                   ref={(el) => {
                     remoteVideoRefs.current[p.socketId] = el;
-                    if (el) {
-                      const s = remoteStreamsRef.current[p.socketId];
-                      if (s) {
-                        try {
-                          el.srcObject = s;
-                          el.play().then(() => console.log('Attached and started video element for', p.socketId)).catch((e) => console.warn('Auto-play failed on attach for', p.socketId, e));
-                        } catch (e) {
-                          console.warn('Failed to attach stored stream to video element for', p.socketId, e);
-                        }
-                      }
-                    }
+                    // Don't try to attach/play here - let ontrack handler do it
                   }}
                   style={{ width: '100%', height: '100%', objectFit: 'cover', display: showVideo ? 'block' : 'none' }}
                   playsInline
@@ -516,9 +530,11 @@ export default function MeetingRoom() {
           <IconButton
             aria-label="Toggle Mic"
             icon={isMicOn ? <Mic size={20} /> : <MicOff size={20} />}
-            colorScheme={isMicOn ? "gray" : "red"}
+            colorScheme={isMicOn ? (isSpeaking ? "green" : "gray") : "red"}
             isRound
             onClick={toggleMic}
+            boxShadow={isSpeaking ? "0 0 10px rgba(74, 222, 128, 0.7)" : "none"}
+            transition="all 0.1s"
           />
           <IconButton
             aria-label="Toggle Camera"
