@@ -42,12 +42,11 @@ export default function MeetingRoom() {
     });
 
     socket.on('existing-participants', (data: any) => {
-      console.log('All users in room', id, 'count=', data?.length, data);
+      console.log('Existing participants count=', data?.length);
       // Filter out ourselves (server includes the joining user in the list)
       const filtered = dedupeParticipants(
         data.filter((p: any) => p.socketId !== socket.id)
       );
-      console.log('Filtered participants (without self):', filtered.map((p: any) => p.socketId));
       setParticipants(filtered);
 
       // Create peer connections to existing participants (we initiate)
@@ -65,21 +64,14 @@ export default function MeetingRoom() {
     });
 
     socket.on('user-joined', (data: any) => {
-      console.log('user-joined event', data);
       if (data.socketId === socket.id) return;
-      setParticipants((prev) => {
-        const next = dedupeParticipants([...prev, data]);
-        console.log('Participants after join:', next.map((p: any) => p.socketId));
-        return next;
-      });
-      // Existing participants should not initiate offers for the new user.
-      // The newly joined participant will create offers to existing users.
+      console.log('user-joined', data.socketId);
+      setParticipants((prev) => dedupeParticipants([...prev, data]));
     });
 
     socket.on('user-left', (data: any) => {
-      console.log('user-left event', data);
+      console.log('user-left', data.socketId);
       setParticipants((prev) => prev.filter((p) => p.socketId !== data.socketId));
-      console.log('Participants after leave:', participants.map((p: any) => p.socketId));
       // cleanup peer and refs
       const pc = peersRef.current.get(data.socketId);
       if (pc) {
@@ -120,7 +112,7 @@ export default function MeetingRoom() {
         try {
           await pc.addIceCandidate(new RTCIceCandidate(candidate));
         } catch (err) {
-          console.warn('Failed to add queued ICE candidate', err, candidate);
+          console.warn('Failed to add queued ICE candidate', err);
         }
       }
       iceCandidateQueueRef.current[peerId] = [];
@@ -135,30 +127,23 @@ export default function MeetingRoom() {
         return;
       }
       await peer.setRemoteDescription(new RTCSessionDescription(offer));
-      console.log('Remote SDP (offer) set for', from, '\n', peer.remoteDescription?.sdp?.split('\n').slice(0,10).join('\n'));
-      console.log('Receivers after setting remote offer:', peer.getReceivers().map(r=>({id:r.track?.id, kind: r.track?.kind})));
-      console.log('Transceivers after setting remote offer:', peer.getTransceivers().map(t=>({mid:t.mid,direction:t.direction})));
       await drainIceCandidates(from, peer);
       const answer = await peer.createAnswer();
       await peer.setLocalDescription(answer);
-      console.log('Local SDP (answer) for', from, '\n', peer.localDescription?.sdp?.split('\n').slice(0,10).join('\n'));
       console.log('Sending answer to', from);
       socket.emit('answer', { to: from, answer });
     };
 
     const onAnswer = async ({ from, answer }: any) => {
-      console.log('Received answer from', from);
       const peer = peersRef.current.get(from);
       if (!peer) return;
-      console.log('Peer signaling state before answer:', peer.signalingState);
       if (peer.signalingState !== 'have-local-offer' && peer.signalingState !== 'have-remote-pranswer') {
         console.warn('Ignoring answer because peer is in wrong state:', peer.signalingState);
         return;
       }
       await peer.setRemoteDescription(new RTCSessionDescription(answer));
-      console.log('Remote SDP (answer) set for', from, '\n', peer.remoteDescription?.sdp?.split('\n').slice(0,10).join('\n'));
-      console.log('Receivers after setting remote answer:', peer.getReceivers().map(r=>({id:r.track?.id, kind: r.track?.kind})));
-      console.log('Transceivers after setting remote answer:', peer.getTransceivers().map(t=>({mid:t.mid,direction:t.direction})));
+      const hasVideo = !!peer.remoteDescription?.sdp?.includes('\nm=video');
+      console.log('Received answer from', from, 'm=video=', hasVideo);
       await drainIceCandidates(from, peer);
     };
 
@@ -194,17 +179,6 @@ export default function MeetingRoom() {
 
   useEffect(() => {
     const startMedia = async () => {
-      if (!isCameraOn && !isMicOn) {
-        if (localStreamRef.current) {
-          localStreamRef.current.getTracks().forEach((track) => track.stop());
-          localStreamRef.current = null;
-        }
-        if (localVideoRef.current) {
-          localVideoRef.current.srcObject = null;
-        }
-        return;
-      }
-
       try {
         const constraints: MediaStreamConstraints = {
           video: isCameraOn,
@@ -212,25 +186,42 @@ export default function MeetingRoom() {
         };
 
         console.log('Requesting media with constraints', constraints);
-        const stream = await navigator.mediaDevices.getUserMedia(constraints);
-        localStreamRef.current?.getTracks().forEach((track) => track.stop());
-        localStreamRef.current = stream;
-        console.log('Obtained local stream tracks:', stream.getTracks().map(t => t.kind));
+        
+        // Stop existing tracks
+        if (localStreamRef.current) {
+          localStreamRef.current.getTracks().forEach((track) => {
+            track.stop();
+          });
+        }
 
-        if (localVideoRef.current) {
-          localVideoRef.current.srcObject = stream;
-          await localVideoRef.current.play().catch(() => {});
-          // If we queued initiator peers while waiting for media, create them now
-          const queued = pendingInitiatorQueueRef.current.splice(0);
-          if (queued.length) {
-            const socket = getSocket();
-            console.log('Draining', queued.length, 'queued initiator peers after media ready', queued);
-            queued.forEach((peerId) => {
-              if (!peersRef.current.has(peerId)) {
-                createPeer(peerId, true, socket);
-                console.log('Draining queued initiator peer', peerId);
-              }
-            });
+        // Only get new media if at least one is enabled
+        if (isCameraOn || isMicOn) {
+          const stream = await navigator.mediaDevices.getUserMedia(constraints);
+          localStreamRef.current = stream;
+          console.log('Obtained local stream tracks:', stream.getTracks().map(t => `${t.kind}(${t.enabled})`));
+
+          if (localVideoRef.current) {
+            localVideoRef.current.srcObject = stream;
+            localVideoRef.current.play().catch(() => {});
+            
+            // If we queued initiator peers while waiting for media, create them now
+            const queued = pendingInitiatorQueueRef.current.splice(0);
+            if (queued.length) {
+              const socket = getSocket();
+              console.log('Draining', queued.length, 'queued initiator peers after media ready', queued);
+              queued.forEach((peerId) => {
+                if (!peersRef.current.has(peerId)) {
+                  createPeer(peerId, true, socket);
+                  console.log('Draining queued initiator peer', peerId);
+                }
+              });
+            }
+          }
+        } else {
+          // Both camera and mic are off
+          localStreamRef.current = null;
+          if (localVideoRef.current) {
+            localVideoRef.current.srcObject = null;
           }
         }
       } catch (error) {
@@ -241,28 +232,74 @@ export default function MeetingRoom() {
     startMedia();
 
     return () => {
-      if (localStreamRef.current) {
-        localStreamRef.current.getTracks().forEach((track) => track.stop());
-        localStreamRef.current = null;
-      }
+      // Don't stop tracks here - let the next call handle cleanup
     };
   }, [isCameraOn, isMicOn]);
 
-  // When local stream changes, replace tracks on existing peer connections
+  // When local stream changes, update tracks on existing peer connections
   useEffect(() => {
-    peersRef.current.forEach((peer) => {
+    console.log('Track management effect triggered - isMicOn:', isMicOn, 'isCameraOn:', isCameraOn);
+    
+    peersRef.current.forEach((peer, peerId) => {
       try {
-        const senders = peer.getSenders();
-        senders.forEach((sender) => {
-          if (!sender.track) return;
-          const kind = sender.track.kind;
-          const newTrack = localStreamRef.current?.getTracks().find((t) => t.kind === kind) || null;
-          if (newTrack) {
-            sender.replaceTrack(newTrack).catch(() => {});
+        const transceivers = peer.getTransceivers();
+        
+        transceivers.forEach((transceiver) => {
+          const trackKind = transceiver.receiver.track?.kind || transceiver.sender.track?.kind;
+          
+          if (trackKind === 'audio') {
+            const newAudioTrack = isMicOn 
+              ? localStreamRef.current?.getTracks().find((t) => t.kind === 'audio') || null 
+              : null;
+            
+            const currentTrack = transceiver.sender.track;
+            if (currentTrack && newAudioTrack) {
+              // Replace existing audio track
+              transceiver.sender.replaceTrack(newAudioTrack).catch((err) => {
+                console.warn('Failed to replace audio track:', err);
+              });
+            } else if (!currentTrack && newAudioTrack) {
+              // Add audio track if missing
+              transceiver.sender.replaceTrack(newAudioTrack).catch((err) => {
+                console.warn('Failed to add audio track:', err);
+              });
+            } else if (currentTrack && !newAudioTrack) {
+              // Remove audio track (replace with null)
+              transceiver.sender.replaceTrack(null).catch((err) => {
+                console.warn('Failed to remove audio track:', err);
+              });
+            }
+            
+            console.log('Audio track updated for peer', peerId, '- track:', newAudioTrack ? 'present' : 'null', 'enabled:', transceiver.sender.track?.enabled);
+          } 
+          else if (trackKind === 'video') {
+            const newVideoTrack = isCameraOn 
+              ? localStreamRef.current?.getTracks().find((t) => t.kind === 'video') || null 
+              : null;
+            
+            const currentTrack = transceiver.sender.track;
+            if (currentTrack && newVideoTrack) {
+              // Replace existing video track
+              transceiver.sender.replaceTrack(newVideoTrack).catch((err) => {
+                console.warn('Failed to replace video track:', err);
+              });
+            } else if (!currentTrack && newVideoTrack) {
+              // Add video track if missing
+              transceiver.sender.replaceTrack(newVideoTrack).catch((err) => {
+                console.warn('Failed to add video track:', err);
+              });
+            } else if (currentTrack && !newVideoTrack) {
+              // Remove video track (replace with null)
+              transceiver.sender.replaceTrack(null).catch((err) => {
+                console.warn('Failed to remove video track:', err);
+              });
+            }
+            
+            console.log('Video track updated for peer', peerId, '- track:', newVideoTrack ? 'present' : 'null', 'enabled:', transceiver.sender.track?.enabled);
           }
         });
       } catch (err) {
-        // ignore
+        console.error('Error updating tracks for peer', peerId, ':', err);
       }
     });
   }, [isCameraOn, isMicOn]);
@@ -277,17 +314,35 @@ export default function MeetingRoom() {
 
     peersRef.current.set(peerId, pc);
 
-    // Add local tracks
+    // Ensure both audio and video transceivers exist (even if no tracks yet)
+    // This ensures the SDP will include m=audio and m=video lines
+    const audioTransceiver = pc.addTransceiver('audio', { direction: 'sendrecv' });
+    const videoTransceiver = pc.addTransceiver('video', { direction: 'sendrecv' });
+
+    // Replace the dummy tracks with actual tracks if available
     if (localStreamRef.current) {
-      localStreamRef.current.getTracks().forEach((track) => pc.addTrack(track, localStreamRef.current as MediaStream));
-      console.log('createPeer:', peerId, 'added local tracks:', localStreamRef.current.getTracks().map(t => t.kind));
-      console.log('createPeer:', peerId, 'senders after addTrack:', pc.getSenders().map(s => ({id: s.track?.id, kind: s.track?.kind})));
-      console.log('createPeer:', peerId, 'transceivers:', pc.getTransceivers().map(t => ({mid: t.mid, direction: t.direction, receiver: !!t.receiver})));
+      const audioTrack = localStreamRef.current.getTracks().find(t => t.kind === 'audio');
+      const videoTrack = localStreamRef.current.getTracks().find(t => t.kind === 'video');
+      
+      if (audioTrack && audioTransceiver.sender) {
+        await audioTransceiver.sender.replaceTrack(audioTrack).catch(err => 
+          console.warn('Failed to add audio track to transceiver:', err)
+        );
+      }
+      
+      if (videoTrack && videoTransceiver.sender) {
+        await videoTransceiver.sender.replaceTrack(videoTrack).catch(err => 
+          console.warn('Failed to add video track to transceiver:', err)
+        );
+      }
+      
+      console.log('createPeer:', peerId, 'added local tracks');
+    } else {
+      console.log('createPeer:', peerId, 'no local stream yet, transceivers ready for later');
     }
 
     pc.onicecandidate = (event) => {
       if (event.candidate) {
-        console.log('pc.onicecandidate -> sending candidate for', peerId, event.candidate && event.candidate.candidate?.substring(0,80));
         socket.emit('ice-candidate', { to: peerId, candidate: event.candidate });
       }
     };
@@ -295,9 +350,8 @@ export default function MeetingRoom() {
     pc.ontrack = (event) => {
       const stream = event.streams?.[0];
       if (!stream) return;
-      const kinds = stream.getTracks().map(t => t.kind);
       const id = stream.id;
-      console.log('pc.ontrack from', peerId, 'streamId=', id, 'tracks=', kinds);
+      console.log('pc.ontrack from', peerId, 'streamId=', id, 'track kind=', event.track.kind, 'enabled=', event.track.enabled);
       // store stream so we can attach when element mounts
       remoteStreamsRef.current[peerId] = stream;
       const videoEl = remoteVideoRefs.current[peerId];
@@ -305,7 +359,7 @@ export default function MeetingRoom() {
         try {
           videoEl.srcObject = stream;
           videoEl.play().then(() => {
-            console.log('video.play() succeeded for', peerId, 'streamId=', id);
+            console.log('video.play() succeeded for', peerId);
           }).catch((err) => {
             console.warn('video.play() failed for', peerId, err);
           });
@@ -313,7 +367,7 @@ export default function MeetingRoom() {
           console.warn('Error attaching stream to video element for', peerId, e);
         }
       } else {
-        console.log('video element not mounted yet for', peerId, 'stream stored');
+        console.log('video element not mounted yet for', peerId);
       }
       // Trigger re-render to show video element if needed
       setParticipants((prev) => [...prev]);
@@ -332,21 +386,11 @@ export default function MeetingRoom() {
 
     if (isInitiator) {
       try {
-        // Ensure the offer contains a video m-line even if local media isn't ready.
-        const hasVideoSender = pc.getSenders().some(s => s.track && s.track.kind === 'video');
-        if (!hasVideoSender) {
-          if (localStreamRef.current) {
-            localStreamRef.current.getTracks().forEach((track) => pc.addTrack(track, localStreamRef.current as MediaStream));
-            console.log('createPeer (initiator): added local tracks before offer for', peerId);
-          } else {
-            // create a transceiver so SDP will include m=video
-            pc.addTransceiver('video', { direction: 'sendrecv' });
-            console.log('createPeer (initiator): added transceiver for', peerId);
-          }
-        }
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
-        console.log('Local SDP (offer) for', peerId, '\n', pc.localDescription?.sdp?.split('\n').slice(0,10).join('\n'));
+        const hasMVideo = !!pc.localDescription?.sdp?.includes('\nm=video');
+        const hasMaudio = !!pc.localDescription?.sdp?.includes('\nm=audio');
+        console.log('Local offer created for', peerId, 'm=video=', hasMVideo, 'm=audio=', hasMaudio);
         socket.emit('offer', { to: peerId, offer });
       } catch (err) {
         console.error('Offer error', err);

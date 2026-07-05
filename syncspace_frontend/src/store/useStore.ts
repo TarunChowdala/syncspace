@@ -15,7 +15,7 @@ interface MeetingState {
 export const useStore = create<UserState & MeetingState>((set) => ({
   user: null,
   setUser: (user) => set({ user }),
-  isMicOn: false,
+  isMicOn: true,
   isCameraOn: true,
   toggleMic: () => set((state) => ({ isMicOn: !state.isMicOn })),
   toggleCamera: () => set((state) => ({ isCameraOn: !state.isCameraOn })),
