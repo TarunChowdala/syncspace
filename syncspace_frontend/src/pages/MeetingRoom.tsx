@@ -10,6 +10,7 @@ export default function MeetingRoom() {
   const navigate = useNavigate();
   const { id } = useParams();
   const [participants, setParticipants] = useState<any[]>([]);
+  const [remoteVideoStates, setRemoteVideoStates] = useState<Record<string, boolean>>({});
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const peersRef = useRef<Map<string, RTCPeerConnection>>(new Map());
@@ -25,6 +26,61 @@ export default function MeetingRoom() {
       }
       return acc;
     }, []);
+  };
+
+  const handleLeaveCall = async () => {
+    try {
+      // Close all peer connections
+      peersRef.current.forEach((pc, peerId) => {
+        try {
+          pc.close();
+          console.log('Closed peer connection with', peerId);
+        } catch (e) {
+          console.error('Error closing peer connection:', e);
+        }
+      });
+      peersRef.current.clear();
+
+      // Stop all local media tracks
+      if (localStreamRef.current) {
+        localStreamRef.current.getTracks().forEach((track) => {
+          try {
+            track.stop();
+            console.log('Stopped local track:', track.kind);
+          } catch (e) {
+            console.error('Error stopping local track:', e);
+          }
+        });
+        localStreamRef.current = null;
+      }
+
+      // Clear all remote video elements and streams
+      Object.keys(remoteVideoRefs.current).forEach((peerId) => {
+        try {
+          if (remoteVideoRefs.current[peerId]) {
+            remoteVideoRefs.current[peerId]!.srcObject = null;
+          }
+          delete remoteVideoRefs.current[peerId];
+        } catch (e) {
+          console.error('Error clearing remote video:', e);
+        }
+      });
+
+      Object.keys(remoteStreamsRef.current).forEach((peerId) => {
+        delete remoteStreamsRef.current[peerId];
+      });
+
+      // Disconnect socket and leave room
+      leaveRoom();
+      console.log('Left room and disconnected from socket');
+
+      // Navigate back to home
+      navigate('/');
+    } catch (error) {
+      console.error('Error during leave call:', error);
+      // Still navigate even if there's an error
+      navigate('/');
+    }
   };
 
   useEffect(() => {
@@ -242,62 +298,47 @@ export default function MeetingRoom() {
     
     peersRef.current.forEach((peer, peerId) => {
       try {
-        const transceivers = peer.getTransceivers();
+        const senders = peer.getSenders();
         
-        transceivers.forEach((transceiver) => {
-          const trackKind = transceiver.receiver.track?.kind || transceiver.sender.track?.kind;
-          
-          if (trackKind === 'audio') {
-            const newAudioTrack = isMicOn 
-              ? localStreamRef.current?.getTracks().find((t) => t.kind === 'audio') || null 
-              : null;
-            
-            const currentTrack = transceiver.sender.track;
-            if (currentTrack && newAudioTrack) {
-              // Replace existing audio track
-              transceiver.sender.replaceTrack(newAudioTrack).catch((err) => {
-                console.warn('Failed to replace audio track:', err);
-              });
-            } else if (!currentTrack && newAudioTrack) {
-              // Add audio track if missing
-              transceiver.sender.replaceTrack(newAudioTrack).catch((err) => {
-                console.warn('Failed to add audio track:', err);
-              });
-            } else if (currentTrack && !newAudioTrack) {
-              // Remove audio track (replace with null)
-              transceiver.sender.replaceTrack(null).catch((err) => {
-                console.warn('Failed to remove audio track:', err);
-              });
-            }
-            
-            console.log('Audio track updated for peer', peerId, '- track:', newAudioTrack ? 'present' : 'null', 'enabled:', transceiver.sender.track?.enabled);
-          } 
-          else if (trackKind === 'video') {
-            const newVideoTrack = isCameraOn 
-              ? localStreamRef.current?.getTracks().find((t) => t.kind === 'video') || null 
-              : null;
-            
-            const currentTrack = transceiver.sender.track;
-            if (currentTrack && newVideoTrack) {
-              // Replace existing video track
-              transceiver.sender.replaceTrack(newVideoTrack).catch((err) => {
-                console.warn('Failed to replace video track:', err);
-              });
-            } else if (!currentTrack && newVideoTrack) {
-              // Add video track if missing
-              transceiver.sender.replaceTrack(newVideoTrack).catch((err) => {
-                console.warn('Failed to add video track:', err);
-              });
-            } else if (currentTrack && !newVideoTrack) {
-              // Remove video track (replace with null)
-              transceiver.sender.replaceTrack(null).catch((err) => {
-                console.warn('Failed to remove video track:', err);
-              });
-            }
-            
-            console.log('Video track updated for peer', peerId, '- track:', newVideoTrack ? 'present' : 'null', 'enabled:', transceiver.sender.track?.enabled);
-          }
+        // Handle video track
+        const videoSender = senders.find((s) => {
+          try { return s.track?.kind === 'video'; } catch { return false; }
         });
+        const newVideoTrack = isCameraOn 
+          ? localStreamRef.current?.getTracks().find((t) => t.kind === 'video') || null 
+          : null;
+        
+        if (videoSender) {
+          videoSender.replaceTrack(newVideoTrack).then(() => {
+            console.log('Video track replaced for peer', peerId, '- new track:', newVideoTrack ? 'present' : 'null');
+          }).catch((err) => {
+            console.warn('Failed to replace video track:', err);
+          });
+        } else if (newVideoTrack && localStreamRef.current) {
+          // Add video track if it doesn't exist as a sender
+          peer.addTrack(newVideoTrack, localStreamRef.current);
+          console.log('Video track added for peer', peerId);
+        }
+        
+        // Handle audio track
+        const audioSender = senders.find((s) => {
+          try { return s.track?.kind === 'audio'; } catch { return false; }
+        });
+        const newAudioTrack = isMicOn 
+          ? localStreamRef.current?.getTracks().find((t) => t.kind === 'audio') || null 
+          : null;
+        
+        if (audioSender) {
+          audioSender.replaceTrack(newAudioTrack).then(() => {
+            console.log('Audio track replaced for peer', peerId, '- new track:', newAudioTrack ? 'present' : 'null');
+          }).catch((err) => {
+            console.warn('Failed to replace audio track:', err);
+          });
+        } else if (newAudioTrack && localStreamRef.current) {
+          // Add audio track if it doesn't exist as a sender
+          peer.addTrack(newAudioTrack, localStreamRef.current);
+          console.log('Audio track added for peer', peerId);
+        }
       } catch (err) {
         console.error('Error updating tracks for peer', peerId, ':', err);
       }
@@ -314,31 +355,17 @@ export default function MeetingRoom() {
 
     peersRef.current.set(peerId, pc);
 
-    // Ensure both audio and video transceivers exist (even if no tracks yet)
-    // This ensures the SDP will include m=audio and m=video lines
-    const audioTransceiver = pc.addTransceiver('audio', { direction: 'sendrecv' });
-    const videoTransceiver = pc.addTransceiver('video', { direction: 'sendrecv' });
-
-    // Replace the dummy tracks with actual tracks if available
+    // Add local tracks if available
     if (localStreamRef.current) {
-      const audioTrack = localStreamRef.current.getTracks().find(t => t.kind === 'audio');
-      const videoTrack = localStreamRef.current.getTracks().find(t => t.kind === 'video');
-      
-      if (audioTrack && audioTransceiver.sender) {
-        await audioTransceiver.sender.replaceTrack(audioTrack).catch(err => 
-          console.warn('Failed to add audio track to transceiver:', err)
-        );
-      }
-      
-      if (videoTrack && videoTransceiver.sender) {
-        await videoTransceiver.sender.replaceTrack(videoTrack).catch(err => 
-          console.warn('Failed to add video track to transceiver:', err)
-        );
-      }
-      
-      console.log('createPeer:', peerId, 'added local tracks');
+      localStreamRef.current.getTracks().forEach((track) => {
+        pc.addTrack(track, localStreamRef.current as MediaStream);
+      });
+      console.log('createPeer:', peerId, 'added local tracks from stream');
     } else {
-      console.log('createPeer:', peerId, 'no local stream yet, transceivers ready for later');
+      // If no local stream yet, add dummy transceivers so SDP includes m=audio and m=video
+      pc.addTransceiver('audio', { direction: 'sendrecv' });
+      pc.addTransceiver('video', { direction: 'sendrecv' });
+      console.log('createPeer:', peerId, 'added transceivers, no local stream yet');
     }
 
     pc.onicecandidate = (event) => {
@@ -352,6 +379,28 @@ export default function MeetingRoom() {
       if (!stream) return;
       const id = stream.id;
       console.log('pc.ontrack from', peerId, 'streamId=', id, 'track kind=', event.track.kind, 'enabled=', event.track.enabled);
+      
+      // Update video state tracking
+      if (event.track.kind === 'video') {
+        setRemoteVideoStates((prev) => ({ ...prev, [peerId]: event.track.enabled }));
+        
+        // Listen for track enable/disable changes
+        event.track.onended = () => {
+          console.log('Video track ended for', peerId);
+          setRemoteVideoStates((prev) => ({ ...prev, [peerId]: false }));
+        };
+        
+        event.track.addEventListener('mute', () => {
+          console.log('Video track muted for', peerId);
+          setRemoteVideoStates((prev) => ({ ...prev, [peerId]: false }));
+        });
+        
+        event.track.addEventListener('unmute', () => {
+          console.log('Video track unmuted for', peerId);
+          setRemoteVideoStates((prev) => ({ ...prev, [peerId]: true }));
+        });
+      }
+      
       // store stream so we can attach when element mounts
       remoteStreamsRef.current[peerId] = stream;
       const videoEl = remoteVideoRefs.current[peerId];
@@ -406,9 +455,15 @@ export default function MeetingRoom() {
       <Box flex="1" p={4} overflow="hidden">
         <Grid templateColumns="repeat(auto-fit, minmax(300px, 1fr))" gap={4} h="full">
           <GridItem bg="gray.800" borderRadius="xl" position="relative" overflow="hidden" minH="320px">
-            <video ref={localVideoRef} style={{ width: '100%', height: '100%', objectFit: 'cover' }} muted playsInline />
+            <video 
+              ref={localVideoRef} 
+              style={{ width: '100%', height: '100%', objectFit: 'cover', display: isCameraOn ? 'block' : 'none' }} 
+              muted 
+              playsInline 
+            />
             {!isCameraOn && (
-              <Flex position="absolute" inset={0} align="center" justify="center" bg="blackAlpha.700">
+              <Flex position="absolute" inset={0} align="center" justify="center" bg="blackAlpha.700" flexDirection="column">
+                <Avatar size="2xl" name={user?.name || localStorage.getItem('userName') || 'You'} mb={4} />
                 <Text fontSize="xl" color="white">Camera is off</Text>
               </Flex>
             )}
@@ -419,6 +474,8 @@ export default function MeetingRoom() {
 
           {participants.map((p) => {
             const hasStream = !!remoteVideoRefs.current[p.socketId]?.srcObject;
+            const videoEnabled = remoteVideoStates[p.socketId] !== false;
+            const showVideo = hasStream && videoEnabled;
             return (
               <GridItem key={p.socketId} bg="gray.800" borderRadius="xl" position="relative" display="flex" alignItems="center" justifyContent="center" overflow="hidden">
                 <video
@@ -436,12 +493,12 @@ export default function MeetingRoom() {
                       }
                     }
                   }}
-                  style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                  style={{ width: '100%', height: '100%', objectFit: 'cover', display: showVideo ? 'block' : 'none' }}
                   playsInline
                   autoPlay
                   muted
                 />
-                {!hasStream && <Avatar size="2xl" name={p.userName} />}
+                {!showVideo && <Avatar size="2xl" name={p.userName} />}
                 <Box position="absolute" bottom={4} left={4} bg="blackAlpha.600" px={3} py={1} borderRadius="md">
                   <Text fontSize="sm">{p.userName}</Text>
                 </Box>
@@ -472,7 +529,7 @@ export default function MeetingRoom() {
           />
           <IconButton aria-label="Share Screen" icon={<MonitorUp size={20} />} colorScheme="gray" isRound />
           <IconButton aria-label="Raise Hand" icon={<Hand size={20} />} colorScheme="gray" isRound />
-          <IconButton aria-label="Leave" icon={<PhoneOff size={20} />} colorScheme="red" isRound onClick={() => navigate('/')} />
+          <IconButton aria-label="Leave" icon={<PhoneOff size={20} />} colorScheme="red" isRound onClick={handleLeaveCall} />
         </HStack>
 
         <HStack spacing={4}>
